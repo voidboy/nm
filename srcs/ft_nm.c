@@ -25,12 +25,14 @@ typedef struct Elf32 {
     const Elf32_Ehdr *ehdr;
     const Elf32_Phdr *phdr; /* unused */
     const Elf32_Shdr *shdr;
+    const Elf32_Sym  *symb;
 }   s_Elf32;
 
 typedef struct Elf64 {
     const Elf64_Ehdr *ehdr;
     const Elf64_Phdr *phdr; /* unused */
     const Elf64_Shdr *shdr;
+    const Elf64_Sym  *symb;
 }   s_Elf64;
 
 typedef union ElfN {
@@ -41,6 +43,8 @@ typedef union ElfN {
 typedef struct meta {
     u_ElfN          meta;
     unsigned char   arch;
+    const char      *secNames;
+    const char      *symNames;
 } s_meta; 
 
 
@@ -57,6 +61,63 @@ void fatal(const char *filename, const char *msg)
             filename, msg);
 }
 
+int is_valid_phdr(s_meta *meta, long unsigned int fileSize)
+{
+
+    if (meta->arch == ELFCLASS32)
+    {
+        Elf32_Off programHeaderOffset = meta->meta.e32.ehdr->e_phoff;
+
+        if (programHeaderOffset > fileSize || 
+            programHeaderOffset + sizeof(Elf32_Phdr) * meta->meta.e32.ehdr->e_phnum > fileSize ||
+            meta->meta.e32.ehdr->e_phentsize != sizeof(Elf32_Phdr))
+            return KO;
+        else
+            return OK;
+    }
+    if (meta->arch == ELFCLASS64)
+    {
+        Elf64_Off programHeaderOffset = meta->meta.e64.ehdr->e_phoff;
+
+        if (programHeaderOffset > fileSize || 
+            programHeaderOffset + sizeof(Elf64_Phdr) * meta->meta.e64.ehdr->e_phnum > fileSize ||
+            meta->meta.e64.ehdr->e_phentsize != sizeof(Elf64_Phdr))
+            return KO;
+        else
+            return OK;
+    }
+    return KO;
+}
+
+int is_valid_shdr(s_meta *meta, long unsigned int fileSize)
+{
+    if (meta->arch == ELFCLASS32)
+    {
+        Elf32_Off sectionHeaderOffset = meta->meta.e32.ehdr->e_shoff;
+
+        if (sectionHeaderOffset > fileSize ||
+            sectionHeaderOffset + sizeof(Elf32_Shdr) * meta->meta.e32.ehdr->e_shnum > fileSize ||
+            meta->meta.e32.ehdr->e_shentsize != sizeof(Elf32_Shdr))
+            return KO;
+        else
+            return OK;
+    }
+    if (meta->arch == ELFCLASS64)
+    {
+        Elf64_Off sectionHeaderOffset = meta->meta.e64.ehdr->e_shoff;
+
+        if (sectionHeaderOffset > fileSize || 
+            sectionHeaderOffset + sizeof(Elf64_Shdr) * meta->meta.e64.ehdr->e_shnum > fileSize ||
+            meta->meta.e64.ehdr->e_shentsize != sizeof(Elf64_Shdr))
+            return KO;
+        else
+            return OK;
+     
+    }
+    return KO;
+}
+
+
 char *initElf32(s_meta *meta, const uint8_t *mapped_file,
                 long unsigned int fileSize)
 {
@@ -65,19 +126,12 @@ char *initElf32(s_meta *meta, const uint8_t *mapped_file,
     meta->arch = ELFCLASS32;
     meta->meta.e32.ehdr = (Elf32_Ehdr *)mapped_file;
     /* === PROGRAM HEADER === */
+    if (!is_valid_phdr(meta, fileSize)) return EHEAD;
     Elf32_Off programHeaderOffset = meta->meta.e32.ehdr->e_phoff;
-    /* phdr won't be used */
-    if (programHeaderOffset > fileSize ||
-        programHeaderOffset + sizeof(Elf32_Phdr) * meta->meta.e32.ehdr->e_phnum > fileSize ||
-        meta->meta.e32.ehdr->e_phentsize != sizeof(Elf32_Phdr))
-        return EHEAD;
     DEBUG("[DEBUG] - phdr is @0x%x\n", programHeaderOffset);
     /* === SECTION HEADER === */
+    if (!is_valid_shdr(meta, fileSize)) return EHEAD;
     Elf32_Off sectionHeaderOffset = meta->meta.e32.ehdr->e_shoff;
-    if (sectionHeaderOffset > fileSize ||
-        sectionHeaderOffset + sizeof(Elf32_Shdr) * meta->meta.e32.ehdr->e_shnum > fileSize ||
-        meta->meta.e32.ehdr->e_shentsize != sizeof(Elf32_Shdr))
-        return EHEAD;
     DEBUG("[DEBUG] - shdr is @0x%x\n", sectionHeaderOffset);
     return NULL;
 }
@@ -90,20 +144,13 @@ char *initElf64(s_meta *meta, const uint8_t *mapped_file,
     meta->arch = ELFCLASS64;
     meta->meta.e64.ehdr = (Elf64_Ehdr *)mapped_file;
     /* === PROGRAM HEADER === */
+    if (!is_valid_phdr(meta, fileSize)) return EHEAD;
     Elf64_Off programHeaderOffset = meta->meta.e64.ehdr->e_phoff;
-    /* phdr won't be used */
-    if (programHeaderOffset > fileSize || 
-        programHeaderOffset + sizeof(Elf64_Phdr) * meta->meta.e64.ehdr->e_phnum > fileSize ||
-        meta->meta.e64.ehdr->e_phentsize != sizeof(Elf64_Phdr))
-        return EHEAD;
     meta->meta.e64.phdr = (Elf64_Phdr *)&mapped_file[programHeaderOffset];
     DEBUG("[DEBUG] - phdr is @0x%lx\n", programHeaderOffset);
     /* === SECTION HEADER === */
+    if (!is_valid_shdr(meta, fileSize)) return EHEAD;
     Elf64_Off sectionHeaderOffset = meta->meta.e64.ehdr->e_shoff;
-    if (sectionHeaderOffset > fileSize || 
-        sectionHeaderOffset + sizeof(Elf64_Shdr) * meta->meta.e64.ehdr->e_shnum > fileSize ||
-        meta->meta.e64.ehdr->e_shentsize != sizeof(Elf64_Shdr))
-        return EHEAD;
     meta->meta.e64.shdr = (Elf64_Shdr *)&mapped_file[sectionHeaderOffset];  
     DEBUG("[DEBUG] - shdr is @0x%lx\n", sectionHeaderOffset);
     /* === SYMBOL TABLE === */
@@ -113,10 +160,30 @@ char *initElf64(s_meta *meta, const uint8_t *mapped_file,
     const unsigned int offset = meta->meta.e64.shdr[index].sh_offset;
     if (offset > fileSize)
         return EHEAD;
-    const char *names = (const char *)&mapped_file[offset];
-    if (DEBUGGING)
-        for (const char *name = &names[1]; *name; name++)
-            DEBUG("[DEBUG] - @%p %s\n", name, name);
+    meta->secNames = (const char *)&mapped_file[offset];
+    for (unsigned int i = 0; i < meta->meta.e64.ehdr->e_shnum; i++)
+    {
+        if (meta->meta.e64.shdr[i].sh_type == SHT_SYMTAB)
+        {
+            DEBUG("[DEBUG] - symbol table(%s) @%lx\n",
+                &meta->secNames[meta->meta.e64.shdr[i].sh_name],
+                meta->meta.e64.shdr[i].sh_offset);
+            /* sh_link contains symbols name sections index */
+            meta->meta.e64.symb = (Elf64_Sym *)&mapped_file[meta->meta.e64.shdr[i].sh_offset];
+            
+            meta->symNames = (const char *)&mapped_file[
+                                        meta->meta.e64.shdr[meta->meta.e64.shdr[i].sh_link]
+                                        .sh_offset];
+            for (unsigned int j = 0;
+                j < meta->meta.e64.shdr[i].sh_size / meta->meta.e64.shdr[i].sh_entsize;
+                j++)
+            {
+                if (meta->meta.e64.symb[j].st_name)
+                    printf("%016lx %3d is %s\n", meta->meta.e64.symb[j].st_value, ELF32_ST_TYPE(meta->meta.e64.symb[j].st_info),
+                            &meta->symNames[meta->meta.e64.symb[j].st_name]);
+            }
+        }
+    }
     return NULL;
 }
 
