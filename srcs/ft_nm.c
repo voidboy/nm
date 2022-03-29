@@ -1,10 +1,13 @@
+#include <ctype.h>
 #include <elf.h>
 #include <sys/mman.h>
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <stdlib.h>
 #include <stdint.h>
 #include <string.h>
 #include <unistd.h>
@@ -21,18 +24,28 @@
 #define ESIGN "invalid file signature"
 #define EHEAD "invalid header"
 
+typedef struct symbol {
+    bool            used;
+    unsigned char   bind;
+    unsigned char   type;
+    Elf64_Addr      addr;
+    const char      *name;
+}   s_symbol;
+
 typedef struct Elf32 {
-    const Elf32_Ehdr *ehdr;
-    const Elf32_Phdr *phdr; /* unused */
-    const Elf32_Shdr *shdr;
-    const Elf32_Sym  *symb;
+    const Elf32_Ehdr    *ehdr;
+    const Elf32_Phdr    *phdr; 
+    const Elf32_Shdr    *shdr;
+    const Elf32_Sym     *symb;
+    s_symbol            *sort;
 }   s_Elf32;
 
 typedef struct Elf64 {
-    const Elf64_Ehdr *ehdr;
-    const Elf64_Phdr *phdr; /* unused */
-    const Elf64_Shdr *shdr;
-    const Elf64_Sym  *symb;
+    const Elf64_Ehdr    *ehdr;
+    const Elf64_Phdr    *phdr; 
+    const Elf64_Shdr    *shdr;
+    const Elf64_Sym     *symb;
+    s_symbol            *sort;
 }   s_Elf64;
 
 typedef union ElfN {
@@ -59,6 +72,41 @@ void fatal(const char *filename, const char *msg)
 
     dprintf(STDERR_FILENO, "ft_nm: '%s': %s\n",
             filename, msg);
+}
+
+void swap_symbols(s_symbol *s1, s_symbol *s2)
+{
+    s_symbol tmp = *s1;
+
+    *s1 = *s2;
+    *s2 = tmp;
+}
+
+int symb_cmpr(const char *s1, const char *s2)
+{
+    while (*s1 == '_') { s1++; };
+    while (*s2 == '_') { s2++; };
+    while (*s1 && *s2 && tolower(*s1) == tolower(*s2))
+    {
+        s1++;
+        s2++; 
+    }
+    return tolower(*s1) - tolower(*s2);
+}
+
+void sort_symbols(s_meta *meta)
+{
+    s_symbol *sym = meta->meta.e64.sort;
+
+    for (unsigned int i = 0; meta->meta.e64.sort[i].used ; i++)
+    {
+        for (unsigned int j = 0; meta->meta.e64.sort[j].used ; j++)
+            if (symb_cmpr(sym[i].name, sym[j].name) < 0)
+            {
+                DEBUG("[DEBUG] - swapping %s with %s\n", sym[i].name, sym[j].name);
+                swap_symbols(&sym[i], &sym[j]);
+            }
+    }
 }
 
 int is_valid_phdr(s_meta *meta, long unsigned int fileSize)
@@ -163,9 +211,30 @@ char *initElf64(s_meta *meta, const uint8_t *mapped_file,
     meta->secNames = (const char *)&mapped_file[offset];
     for (unsigned int i = 0; i < meta->meta.e64.ehdr->e_shnum; i++)
     {
-        if (meta->meta.e64.shdr[i].sh_type == SHT_SYMTAB)
+        /* .bss SHT_NOBITS SHF_ALLOC + SHF_WRITE */
+        if (meta->meta.e64.shdr[i].sh_type == SHT_NOBITS &&
+            (meta->meta.e64.shdr[i].sh_flags ==  (SHF_ALLOC | SHF_WRITE)) &&
+            !strcmp(".bss", &meta->secNames[meta->meta.e64.shdr[i].sh_name]))
         {
-            DEBUG("[DEBUG] - symbol table(%s) @%lx\n",
+
+            DEBUG("[DEBUG] - bss section(%s) @%lx\n",
+                &meta->secNames[meta->meta.e64.shdr[i].sh_name],
+                meta->meta.e64.shdr[i].sh_offset);
+        }
+        /* text */
+        else if (meta->meta.e64.shdr[i].sh_type == SHT_PROGBITS &&
+            !strcmp(".text", &meta->secNames[meta->meta.e64.shdr[i].sh_name]))
+        {
+
+            DEBUG("[DEBUG] - text section(%s) @%lx\n",
+                &meta->secNames[meta->meta.e64.shdr[i].sh_name],
+                meta->meta.e64.shdr[i].sh_offset);
+        }
+        /* symbol */
+        else if (meta->meta.e64.shdr[i].sh_type == SHT_SYMTAB &&
+            !strcmp(".symtab", &meta->secNames[meta->meta.e64.shdr[i].sh_name]))
+        {
+            DEBUG("[DEBUG] - symbol section(%s) @%lx\n",
                 &meta->secNames[meta->meta.e64.shdr[i].sh_name],
                 meta->meta.e64.shdr[i].sh_offset);
             /* sh_link contains symbols name sections index */
@@ -174,13 +243,34 @@ char *initElf64(s_meta *meta, const uint8_t *mapped_file,
             meta->symNames = (const char *)&mapped_file[
                                         meta->meta.e64.shdr[meta->meta.e64.shdr[i].sh_link]
                                         .sh_offset];
-            for (unsigned int j = 0;
-                j < meta->meta.e64.shdr[i].sh_size / meta->meta.e64.shdr[i].sh_entsize;
-                j++)
+            const unsigned int symbols_nbr = meta->meta.e64.shdr[i].sh_size /
+                                            meta->meta.e64.shdr[i].sh_entsize;
+            meta->meta.e64.sort = malloc(sizeof(s_symbol) * (symbols_nbr + 1));
+            for (unsigned int j = 0; j < symbols_nbr; j++)
+                meta->meta.e64.sort[j] = (s_symbol) {.used = false} ;
+            for (unsigned int j = 0, k = 0; j < symbols_nbr; j++)
             {
-                if (meta->meta.e64.symb[j].st_name)
-                    printf("%016lx %3d is %s\n", meta->meta.e64.symb[j].st_value, ELF32_ST_TYPE(meta->meta.e64.symb[j].st_info),
-                            &meta->symNames[meta->meta.e64.symb[j].st_name]);
+                unsigned char   bind = ELF64_ST_BIND(meta->meta.e64.symb[j].st_info);
+                unsigned char   type = ELF64_ST_TYPE(meta->meta.e64.symb[j].st_info);
+
+                if (meta->meta.e64.symb[j].st_name && type != STT_FILE)
+                {
+                    const char*     name = &meta->symNames[meta->meta.e64.symb[j].st_name];
+                    unsigned long   addr = meta->meta.e64.symb[j].st_value;
+
+                    meta->meta.e64.sort[k++] = (s_symbol) {true, bind, type, addr, name};
+
+               }
+            }
+            sort_symbols(meta);
+            for (unsigned int j = 0; meta->meta.e64.sort[j].used ; j++)
+            {
+                const s_symbol current = meta->meta.e64.sort[j];
+
+                if (current.addr)
+                    printf("%42s %016lx %d %d\n", current.name, current.addr, current.bind, current.type);
+                else
+                    printf("%42s %16s %d %d\n", current.name, "", current.bind, current.type);
             }
         }
     }

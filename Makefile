@@ -2,7 +2,7 @@ CXX			= gcc
 NAME		= ft_nm
 SRC			= $(wildcard srcs/*.c)
 OBJ			= $(SRC:.c=.o)
-CXXFLAGS	= -I./inc -Wall -Wextra -g -Werror -D DEBUGGING
+CXXFLAGS	= -I./inc -Wall -Wextra -g -Werror #-D DEBUGGING
 
 
 all			: $(NAME)
